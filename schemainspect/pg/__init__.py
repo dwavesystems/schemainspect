@@ -15,12 +15,17 @@ CREATE_FUNCTION_FORMAT = """create or replace function {signature}
 returns {result_string} as
 $${definition}$$
 language {language} {volatility} {strictness} {security_type};"""
+CREATE_TRIGGER_FORMAT = """create trigger {name} {timing} {manipulation}
+on {object_schema}.{object_table}
+for {orientation}
+{when}{statement};"""
 ALL_RELATIONS_QUERY = resource_text("relations.sql")
 SCHEMAS_QUERY = resource_text("schemas.sql")
 INDEXES_QUERY = resource_text("indexes.sql")
 SEQUENCES_QUERY = resource_text("sequences.sql")
 CONSTRAINTS_QUERY = resource_text("constraints.sql")
 FUNCTIONS_QUERY = resource_text("functions.sql")
+TRIGGERS_QUERY = resource_text("triggers.sql")
 EXTENSIONS_QUERY = resource_text("extensions.sql")
 ENUMS_QUERY = resource_text("enums.sql")
 DEPS_QUERY = resource_text("deps.sql")
@@ -135,6 +140,69 @@ class InspectedFunction(InspectedSelectable):
             and self.volatility == other.volatility
             and self.strictness == other.strictness
             and self.security_type == other.security_type
+        )
+
+
+class InspectedTrigger(Inspected):
+    def __init__(
+        self,
+        name,
+        schema,
+        manipulation,
+        object_schema,
+        object_table,
+        condition,
+        statement,
+        orientation,
+        timing,
+    ):
+        self.name = name
+        self.schema = schema
+        self.manipulation = manipulation
+        self.object_schema = object_schema
+        self.object_table = object_table
+        self.condition = condition
+        self.statement = statement
+        self.orientation = orientation
+        self.timing = timing
+
+    @property
+    def create_statement(self):
+        return CREATE_TRIGGER_FORMAT.format(
+            name=self.name,
+            manipulation=self.manipulation,
+            object_schema=self.object_schema,
+            object_table=self.object_table,
+            when=self.make_when(),
+            statement=self.statement,
+            orientation=self.orientation,
+            timing=self.timing,
+        )
+
+    def make_when(self):
+        if self.condition:
+            return f'when {self.condition}\n'
+        else:
+            return ''
+
+    @property
+    def drop_statement(self):
+        return 'drop trigger if exists {} on "{}"."{}" cascade;'.format(
+            self.name,
+            self.object_schema,
+            self.object_table
+        )
+
+    def __eq__(self, other):
+        return (
+            self.name == other.name
+            and self.manipulation == other.manipulation
+            and self.object_schema == other.object_schema
+            and self.object_table == other.object_table
+            and self.condition == other.condition
+            and self.statement == other.statement
+            and self.orientation == other.orientation
+            and self.timing == other.timing
         )
 
 
@@ -385,6 +453,7 @@ class PostgreSQL(DBInspector):
         self.SEQUENCES_QUERY = processed(SEQUENCES_QUERY)
         self.CONSTRAINTS_QUERY = processed(CONSTRAINTS_QUERY)
         self.FUNCTIONS_QUERY = processed(FUNCTIONS_QUERY)
+        self.TRIGGERS_QUERY = processed(TRIGGERS_QUERY)
         self.EXTENSIONS_QUERY = processed(EXTENSIONS_QUERY)
         self.ENUMS_QUERY = processed(ENUMS_QUERY)
         self.DEPS_QUERY = processed(DEPS_QUERY)
@@ -396,6 +465,7 @@ class PostgreSQL(DBInspector):
         self.load_schemas()
         self.load_all_relations()
         self.load_functions()
+        self.load_triggers()
         self.selectables = od()
         self.selectables.update(self.relations)
         self.selectables.update(self.functions)
@@ -619,6 +689,25 @@ class PostgreSQL(DBInspector):
             )
             identity_arguments = "({})".format(s.identity_arguments)
             self.functions[s.quoted_full_name + identity_arguments] = s
+
+    def load_triggers(self):
+        self.triggers = od()
+        q = self.c.execute(self.TRIGGERS_QUERY)
+        for _, g in groupby(q, lambda x: (x.schema, x.name)):
+            clist = list(g)
+            t = clist[0]
+            s = InspectedTrigger(
+                schema=t.schema,
+                name=t.name,
+                manipulation=t.event_manipulation,
+                object_schema=t.event_object_schema,
+                object_table=t.event_object_table,
+                condition=t.action_condition,
+                statement=t.action_statement,
+                orientation=t.action_orientation,
+                timing=t.action_timing,
+            )
+            self.triggers[s.quoted_full_name] = s
 
     def one_schema(self, schema):
         props = "schemas relations tables views functions selectables sequences constraints indexes enums extensions privileges"
